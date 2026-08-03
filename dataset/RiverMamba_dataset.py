@@ -647,8 +647,8 @@ class RiverMamba_Dataset(Dataset):
                 else:
                     forecast_type = 'hres'
 
-                if len(files_glofas) == len(files_era5_land) == (self.delta_t + self.delta_t_f) and len(
-                        files_obs) == self.delta_t_f and len(files_cpc) == self.delta_t:
+                if len(files_glofas) == len(files_era5_land) == (self.delta_t + self.delta_t_f) and (
+                        not self.is_obs or len(files_obs) == self.delta_t_f) and len(files_cpc) == self.delta_t:
 
                     if self.is_hres_forecast:
                         self.files.append({'glofas': files_glofas[:self.delta_t],

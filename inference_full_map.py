@@ -2,6 +2,9 @@
 """
 Script for testing and validating RiverMamba on full resolution map
 
+Usage:
+python3 inference_full_map.py --config_file ./scripts/RiverMamba_pretrained_models/RiverMamba_full_map_reanalysis.txt --gpu_id 0 --root_glofas_reanalysis ./scripts/GloFAS_Reanalysis_Global --root_static ./scripts/GloFAS_Static --root_era5_land_reanalysis ./scripts/ERA5-Land_Reanalysis_Global --root_hres_forecast ./scripts/ECMWF_HRES_Global --root_cpc ./scripts/CPC_Global --root_obs ./scripts/GloFAS_Reanalysis_Global
+
 Contact Person: Mohamad Hakam Shams Eddin <shams@iai.uni-bonn.de>
 Computer Vision Group - Institute of Computer Science III - University of Bonn
 """
@@ -24,10 +27,12 @@ np.set_printoptions(suppress=True)
 torch.set_printoptions(sci_mode=False)
 np.seterr(divide='ignore', invalid='ignore')
 
-# ------------------------------------------------------------------
+# ----------------------------------------------------Separate heads per lead time--------------
 
-output_path = r'./inference_full_map'
-model_path = r'./RiverMamba_full_map_reanalysis.pth'
+# output_path = r'./inference_full_map'
+# model_path = r'./RiverMamba_full_map_reanalysis.pth'
+output_path = r'./inference_full_map_tmp'
+model_path = r'./scripts/RiverMamba_pretrained_models/RiverMamba_full_map_reanalysis.pth'
 
 os.makedirs(output_path, exist_ok=True)
 
@@ -108,7 +113,11 @@ def test(config_file):
         is_val=True
     )
 
-    val_dataloader = torch.utils.data.DataLoader(val_dataset,
+    remaining = [i for i in range(len(val_dataset))
+                 if not os.path.isfile(os.path.join(output_path, val_dataset.files[i]['file_name'] + '.nc'))]
+    val_subset = torch.utils.data.Subset(val_dataset, remaining)
+
+    val_dataloader = torch.utils.data.DataLoader(val_subset,
                                                  batch_size=batch_size,
                                                  drop_last=False,
                                                  shuffle=False,
@@ -116,7 +125,7 @@ def test(config_file):
                                                  num_workers=config.num_workers
                                                  )
 
-    utils.log_string(logger, "# evaluation samples: %d" % len(val_dataset))
+    utils.log_string(logger, "# evaluation samples: %d (skipped %d already done)" % (len(val_subset), len(val_dataset) - len(val_subset)))
 
     # get models
     utils.log_string(logger, "\nloading the model ...")
@@ -152,8 +161,26 @@ def test(config_file):
         time.sleep(1)
 
         pbar = tqdm(val_dataloader, total=len(val_dataloader), smoothing=0.9, postfix="  training")
+        total_pixels = 6221926
+        t_data_load = []
+        t_preprocess = []
+        t_model = []
+        t_postprocess = []
+        t_save = []
+        t_total = []
+
+        t_iter_start = time.time()
 
         for data in pbar:
+
+            file_name = data['file_name']
+
+            if all(os.path.isfile(os.path.join(output_path, fn + '.nc')) for fn in file_name):
+                t_iter_start = time.time()
+                continue
+
+            t_data_end = time.time()
+            t_data_load.append(t_data_end - t_iter_start)
 
             data_glofas_i = data['glofas']  # B, T, P, C
             data_era5_land_i = data['era5']
@@ -161,19 +188,19 @@ def test(config_file):
             data_hres_i = data['hres_forecast']
             data_cpc_i = data['cpc']
             curves_i = data['curves']
-            file_name = data['file_name']
 
             preds = np.zeros((len(file_name), config.delta_t_f, data_glofas_i.shape[2], 1))
             preds[:] = np.nan
 
             curves_i = curves_i.cpu().numpy()[0]  # number of curves, 2, 2
 
+            t_preprocess_start = time.time()
+            t_model_total = 0
+
             # divide the data along the first curve and run inference sequentially
             for r in range(sample_division):
 
                 random_indices = curves_i[2, 0, :][n_points * r: n_points * (r + 1)]
-                #random_indices = val_dataset.curves_series[0][r::sample_division][:n_points]
-                #random_indices = curves_i[2, 0, :][r::sample_division]
 
                 sampled_series = np.arange(len(random_indices))
                 dictionary = dict(zip(random_indices, sampled_series))
@@ -189,6 +216,9 @@ def test(config_file):
                 data_static = data_static_i[:, random_indices, :]
                 data_hres = data_hres_i[:, :, random_indices, :]
                 data_cpc = data_cpc_i[:, :, random_indices, :]
+
+                torch.cuda.synchronize()
+                t_fwd_start = time.time()
 
                 if is_autocast:
                     with autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -213,29 +243,51 @@ def test(config_file):
                                  None,
                                  None
                                  )
-                
+
+                torch.cuda.synchronize()
+                t_model_total += time.time() - t_fwd_start
+
                 preds[:, :, random_indices, :] = pred.cpu().float().numpy().astype(np.float64)
 
+            t_preprocess.append(time.time() - t_preprocess_start - t_model_total)
+            t_model.append(t_model_total)
+
+            t_post_start = time.time()
             preds = val_dataset.log1p_inv_transform(preds)
-            
+
             data_glofas_i = data_glofas_i[:, -1:, :, 1:1 + 1].cpu().numpy()
             data_glofas_i = val_dataset.inv_transform(data_glofas_i, 53.86304994405949, 1621.447677699888)
-            #data_glofas_i = val_dataset.inv_transform(data_glofas_i,
-            #                                          val_dataset.glofas_mean[val_dataset.dis24_index],
-            #                                          val_dataset.glofas_std[val_dataset.dis24_index]
-            #                                          )
 
             preds = data_glofas_i + preds
             preds = np.clip(preds, 0, a_max=None)
 
             preds = preds[:, :, :, 0]
+            t_postprocess.append(time.time() - t_post_start)
 
+            t_save_start = time.time()
             for b in range(len(preds)):
 
                 file_output = os.path.join(output_path, file_name[b] + '.nc')
 
                 data_out = xr.Dataset(data_vars=dict(dis24=(["time", "x"], preds[b].astype(np.float32))))
                 data_out.to_netcdf(file_output)
+            t_save.append(time.time() - t_save_start)
+
+            t_total.append(t_data_load[-1] + t_preprocess[-1] + t_model[-1] + t_postprocess[-1] + t_save[-1])
+
+            n = len(t_total)
+            if True:
+                utils.log_string(logger, '=== Perf [%d samples] ===' % n)
+                utils.log_string(logger, '  data loading : %7.2f ± %5.2f s (%.1f%%)' % (np.mean(t_data_load), np.std(t_data_load), 100 * np.sum(t_data_load) / np.sum(t_total)))
+                utils.log_string(logger, '  preprocessing: %7.2f ± %5.2f s (%.1f%%)' % (np.mean(t_preprocess), np.std(t_preprocess), 100 * np.sum(t_preprocess) / np.sum(t_total)))
+                utils.log_string(logger, '  model forward: %7.2f ± %5.2f s (%.1f%%)' % (np.mean(t_model), np.std(t_model), 100 * np.sum(t_model) / np.sum(t_total)))
+                utils.log_string(logger, '  postprocessing:%7.2f ± %5.2f s (%.1f%%)' % (np.mean(t_postprocess), np.std(t_postprocess), 100 * np.sum(t_postprocess) / np.sum(t_total)))
+                utils.log_string(logger, '  saving       : %7.2f ± %5.2f s (%.1f%%)' % (np.mean(t_save), np.std(t_save), 100 * np.sum(t_save) / np.sum(t_total)))
+                utils.log_string(logger, '  total        : %7.2f ± %5.2f s' % (np.mean(t_total), np.std(t_total)))
+                utils.log_string(logger, '  per pixel    : %7.2f ± %5.2f μs' % (np.mean(t_total) / total_pixels * 1e6, np.std(t_total) / total_pixels * 1e6))
+                utils.log_string(logger, '  model only/px: %7.2f ± %5.2f μs' % (np.mean(t_model) / total_pixels * 1e6, np.std(t_model) / total_pixels * 1e6))
+
+            t_iter_start = time.time()
 
 
 if __name__ == '__main__':

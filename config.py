@@ -466,11 +466,38 @@ def add_all_arguments(parser):
     return parser
 
 
+def load_config_from_txt(config, path):
+    import ast
+    import re
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('-') or ':' not in line:
+                continue
+            m = re.match(r'^([\w]+):\s*(.+?)\s*\[default:', line)
+            if not m:
+                continue
+            key = m.group(1)
+            val_str = m.group(2).strip()
+            try:
+                val = ast.literal_eval(val_str)
+            except (ValueError, SyntaxError):
+                val = val_str
+            setattr(config, key, val)
+
+
 def read_arguments(train=True, print=True, save=True):
     parser = argparse.ArgumentParser()
     parser = add_all_arguments(parser)
+    parser.add_argument('--config_file', type=str, default=None,
+                        help='path to a config txt file to load settings from')
     parser.add_argument('--phase', type=str, default='train')
     config = parser.parse_args()
+    if config.config_file is not None:
+        txt_config = argparse.Namespace()
+        load_config_from_txt(txt_config, config.config_file)
+        parser.set_defaults(**vars(txt_config))
+        config = parser.parse_args()
     config.phase = 'train' if train else 'test'
     if print:
         print_options(config, parser)

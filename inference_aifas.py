@@ -27,14 +27,15 @@ np.seterr(divide='ignore', invalid='ignore')
 # ------------------------------------------------------------------
 
 output_path = r'./inference'
-model_path = r'./RiverMamba_aifas_reanalysis.pth'
+# model_path = r'./scripts/RiverMamba_pretrained_models/RiverMamba_aifas_reanalysis.pth'
+model_path = r'./scripts/my_pretrained_models/RiverMamba_aifas_reanalysis.pth'
 
 os.makedirs(output_path, exist_ok=True)
 
 batch_size = 1
 num_workers = 0
 name = 'inference_aifas'
-years_test = ['2019', '2020', '2021', '2022', '2023', '2024']
+years_test = ['2024']
 
 is_obs = False
 n_points = 254945
